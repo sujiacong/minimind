@@ -1,48 +1,80 @@
-import argparse
-import random
-import time
-import numpy as np
-import torch
-import warnings
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from model.model import MiniMindLM
-from model.LMConfig import LMConfig
-from model.model_lora import *
+# 导入必要的库和模块
+import argparse  # 用于解析命令行参数
+import random  # 用于生成随机数
+import time  # 用于时间相关的操作
+import numpy as np  # 用于科学计算
+import torch  # PyTorch 深度学习框架
+import warnings  # 用于控制警告信息的显示
+from transformers import AutoTokenizer, AutoModelForCausalLM  # Hugging Face Transformers 库中的分词器和模型
+from model.model import MiniMindLM  # 自定义的 MiniMindLM 模型
+from model.LMConfig import LMConfig  # 自定义的模型配置类
+from model.model_lora import *  # LoRA 相关模块
 
+# 忽略所有警告信息
 warnings.filterwarnings('ignore')
 
 
 def init_model(args):
+    """
+    初始化模型和分词器。
+    
+    参数:
+    args (argparse.Namespace): 包含命令行参数的对象
+    
+    返回:
+    model (torch.nn.Module): 初始化后的模型
+    tokenizer (transformers.PreTrainedTokenizer): 分词器
+    """
+    # 加载预训练的分词器
     tokenizer = AutoTokenizer.from_pretrained('./model/minimind_tokenizer')
+    
     if args.load == 0:
-        moe_path = '_moe' if args.use_moe else ''
-        modes = {0: 'pretrain', 1: 'full_sft', 2: 'rlhf', 3: 'reason'}
-        ckp = f'./{args.out_dir}/{modes[args.model_mode]}_{args.dim}{moe_path}.pth'
-
+        # 如果使用原生 PyTorch 权重加载模型
+        moe_path = '_moe' if args.use_moe else ''  # 根据是否使用 MoE 决定路径后缀
+        modes = {0: 'pretrain', 1: 'full_sft', 2: 'rlhf', 3: 'reason'}  # 不同模式对应的文件名前缀
+        ckp = f'./{args.out_dir}/{modes[args.model_mode]}_{args.dim}{moe_path}.pth'  # 模型权重文件路径
+        
+        # 创建 MiniMindLM 模型实例
         model = MiniMindLM(LMConfig(
-            dim=args.dim,
-            n_layers=args.n_layers,
-            max_seq_len=args.max_seq_len,
-            use_moe=args.use_moe
+            dim=args.dim,  # 模型维度
+            n_layers=args.n_layers,  # 模型层数
+            max_seq_len=args.max_seq_len,  # 最大序列长度
+            use_moe=args.use_moe  # 是否使用 MoE
         ))
-
+        
+        # 加载模型权重
         state_dict = torch.load(ckp, map_location=args.device)
         model.load_state_dict({k: v for k, v in state_dict.items() if 'mask' not in k}, strict=True)
-
+        
+        # 如果指定了 LoRA 名称，则应用 LoRA 并加载 LoRA 权重
         if args.lora_name != 'None':
             apply_lora(model)
             load_lora(model, f'./{args.out_dir}/lora/{args.lora_name}_{args.dim}.pth')
     else:
+        # 如果使用 Hugging Face Transformers 加载模型
         transformers_model_path = './MiniMind2'
         tokenizer = AutoTokenizer.from_pretrained(transformers_model_path)
         model = AutoModelForCausalLM.from_pretrained(transformers_model_path, trust_remote_code=True)
+    
+    # 打印模型参数量
     print(f'MiniMind模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M(illion)')
+    
+    # 返回模型和分词器，并将模型设置为评估模式并移动到指定设备
     return model.eval().to(args.device), tokenizer
 
 
 def get_prompt_datas(args):
+    """
+    获取提示数据，根据不同的模型模式和 LoRA 名称选择不同的提示数据。
+    
+    参数:
+    args (argparse.Namespace): 包含命令行参数的对象
+    
+    返回:
+    prompt_datas (list): 提示数据列表
+    """
     if args.model_mode == 0:
-        # pretrain模型的接龙能力（无法对话）
+        # 预训练模型的接龙能力（无法对话）
         prompt_datas = [
             '马克思主义基本原理',
             '人类大脑的主要功能',
@@ -86,12 +118,18 @@ def get_prompt_datas(args):
                 ],
             }
             prompt_datas = lora_prompt_datas[args.lora_name]
-
+    
     return prompt_datas
 
 
 # 设置可复现的随机种子
 def setup_seed(seed):
+    """
+    设置可复现的随机种子，确保每次运行结果一致。
+    
+    参数:
+    seed (int): 随机种子值
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -102,6 +140,9 @@ def setup_seed(seed):
 
 
 def main():
+    """
+    主函数，负责解析命令行参数、初始化模型、获取提示数据并进行推理。
+    """
     parser = argparse.ArgumentParser(description="Chat with MiniMind")
     parser.add_argument('--lora_name', default='None', type=str)
     parser.add_argument('--out_dir', default='out', type=str)
@@ -122,30 +163,40 @@ def main():
     parser.add_argument('--history_cnt', default=0, type=int)
     parser.add_argument('--stream', default=True, type=bool)
     parser.add_argument('--load', default=0, type=int, help="0: 原生torch权重，1: transformers加载")
-    parser.add_argument('--model_mode', default=1, type=int,
-                        help="0: 预训练模型，1: SFT-Chat模型，2: RLHF-Chat模型，3: Reason模型")
+    parser.add_argument('--model_mode', default=1, type=int, help="0: 预训练模型，1: SFT-Chat模型，2: RLHF-Chat模型，3: Reason模型")
+    
+    # 解析命令行参数
     args = parser.parse_args()
-
+    
+    # 初始化模型和分词器
     model, tokenizer = init_model(args)
-
+    
+    # 获取提示数据
     prompts = get_prompt_datas(args)
+    
+    # 选择测试模式：自动测试或手动输入
     test_mode = int(input('[0] 自动测试\n[1] 手动输入\n'))
+    
     messages = []
     for idx, prompt in enumerate(prompts if test_mode == 0 else iter(lambda: input('👶: '), '')):
+        # 设置随机种子
         setup_seed(random.randint(0, 2048))
         # setup_seed(2025)  # 如需固定每次输出则换成【固定】的随机种子
         if test_mode == 0: print(f'👶: {prompt}')
 
         messages = messages[-args.history_cnt:] if args.history_cnt else []
         messages.append({"role": "user", "content": prompt})
-
+        
+        # 构建新的提示文本
         new_prompt = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True
         )[-args.max_seq_len + 1:] if args.model_mode != 0 else (tokenizer.bos_token + prompt)
-
+        
         answer = new_prompt
+        
+        # 进行推理
         with torch.no_grad():
             x = torch.tensor(tokenizer(new_prompt)['input_ids'], device=args.device).unsqueeze(0)
             outputs = model.generate(
@@ -157,7 +208,7 @@ def main():
                 stream=True,
                 pad_token_id=tokenizer.pad_token_id
             )
-
+            
             print('🤖️: ', end='')
             try:
                 if not args.stream:
@@ -173,7 +224,7 @@ def main():
             except StopIteration:
                 print("No answer")
             print('\n')
-
+        
         messages.append({"role": "assistant", "content": answer})
 
 
